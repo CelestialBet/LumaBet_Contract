@@ -1,0 +1,17 @@
+[workspace]
+members = [
+  "lumabet_core",
+  "lumabet_dice",
+  "lumabet_rng",
+]
+resolver = "2"
+
+# Workspace-wide package metadata
+[workspace.package]
+name = "lumabet_contract"
+version = "0.1.0"
+edition = "2021"
+authors = ["CelestialBet Team"]
+
+[workspace.dependencies]
+soroban-sdk = { version = "21.0.0" }

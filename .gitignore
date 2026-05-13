@@ -1,0 +1,17 @@
+# Rust / Cargo
+target/
+Cargo.lock
+*.wasm
+*.wat
+
+# Soroban
+.soroban/
+
+# Environment — never commit secrets or private keys
+.env
+.env.local
+.env.production
+
+# OS
+.DS_Store
+*.log
