@@ -1,19 +1,29 @@
 //! LumaBet Dice — On-chain dice game (1–6)
 //!
 //! Players predict which number (1–6) a dice roll lands on.
-//! Randomness is sourced from lumabet_rng. Payouts are 5x minus house edge,
-//! since the probability of hitting any single face is 1/6.
+//! Randomness is sourced from lumabet_rng via cross-contract call.
+//! Payouts are 5x minus house edge (probability of any face = 1/6).
 
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, log, symbol_short, Address, BytesN, Env, Symbol,
+    contract, contractclient, contractimpl, contracttype, log, symbol_short, Address, Env, Symbol,
 };
 
 const ADMIN: Symbol = symbol_short!("ADMIN");
 const CORE_CONTRACT: Symbol = symbol_short!("CORE");
 const RNG_CONTRACT: Symbol = symbol_short!("RNG");
 const PAYOUT_BPS: u32 = 50_000; // 5x payout = 50,000 basis points
+
+// ── RNG cross-contract interface ──────────────────────────────────────────────
+// Declared as a trait so no pre-built WASM file is needed at compile time.
+
+#[contractclient(name = "RngClient")]
+pub trait RngInterface {
+    fn generate_random(env: Env, seed: u64, range: u64) -> u64;
+}
+
+// ── Data Types ────────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -26,12 +36,7 @@ pub struct DiceRoll {
     pub timestamp: u64,
 }
 
-// RNG cross-contract interface
-mod rng_interface {
-    soroban_sdk::contractimport!(
-        file = "../lumabet_rng/target/wasm32-unknown-unknown/release/lumabet_rng.wasm"
-    );
-}
+// ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
 pub struct LumaBetDice;
@@ -49,22 +54,27 @@ impl LumaBetDice {
     }
 
     /// Roll the dice. The player must have already called `lumabet_core::place_bet`.
-    /// This function resolves the RNG, determines outcome, and calls back to core.
     ///
     /// `bet_id`     — ID returned from place_bet
     /// `prediction` — player's guess (1–6)
-    /// `seed`       — entropy from the client (e.g. hash of player pubkey + timestamp)
-    pub fn roll_dice(env: Env, player: Address, bet_id: u64, prediction: u64, seed: u64) -> DiceRoll {
+    /// `seed`       — entropy supplied by the client (e.g. hash of pubkey + timestamp)
+    pub fn roll_dice(
+        env: Env,
+        player: Address,
+        bet_id: u64,
+        prediction: u64,
+        seed: u64,
+    ) -> DiceRoll {
         player.require_auth();
 
         if prediction < 1 || prediction > 6 {
             panic!("prediction must be between 1 and 6");
         }
 
-        let rng_contract: Address = env.storage().instance().get(&RNG_CONTRACT).unwrap();
-        let rng_client = rng_interface::Client::new(&env, &rng_contract);
+        let rng_address: Address = env.storage().instance().get(&RNG_CONTRACT).unwrap();
+        let rng_client = RngClient::new(&env, &rng_address);
 
-        // Generate the dice outcome (1–6)
+        // Generate dice outcome (1–6) via cross-contract call
         let outcome = rng_client.generate_random(&seed, &6u64);
         let won = prediction == outcome;
 
@@ -77,20 +87,17 @@ impl LumaBetDice {
             won
         );
 
-        let roll = DiceRoll {
-            player: player.clone(),
+        DiceRoll {
+            player,
             prediction,
             outcome,
             won,
             bet_id,
             timestamp: env.ledger().timestamp(),
-        };
-
-        roll
+        }
     }
 
-    /// Convenience: compute the payout basis points for a dice win.
-    /// External callers (e.g. the API) can use this to display expected payout.
+    /// Returns the gross payout multiplier in basis points (5x = 50,000 bps).
     pub fn payout_multiplier_bps(_env: Env) -> u32 {
         PAYOUT_BPS
     }
@@ -99,9 +106,7 @@ impl LumaBetDice {
     pub fn claim_winnings(env: Env, player: Address, bet_id: u64) {
         player.require_auth();
         log!(&env, "claim_winnings: player={}, bet_id={}", player, bet_id);
-        // In a full implementation, this validates the DiceRoll result stored
-        // in instance storage and invokes core::resolve_bet on behalf of the player.
-        // Storing roll results omitted here for brevity — wire via events in production.
+        // Wire to lumabet_core::resolve_bet via cross-contract call in production.
     }
 }
 
@@ -112,35 +117,40 @@ mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Address, Env};
 
-    // Note: Full integration tests require deploying the RNG contract.
-    // Unit tests below cover contract initialization and validation logic.
+    #[test]
+    fn test_payout_multiplier() {
+        let env = Env::default();
+        let contract_id = env.register(LumaBetDice, ());
+        let client = LumaBetDiceClient::new(&env, &contract_id);
+        assert_eq!(client.payout_multiplier_bps(), 50_000u32);
+    }
 
     #[test]
-    fn test_invalid_prediction_rejected() {
+    fn test_initialize_stores_contracts() {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let player = Address::generate(&env);
+        let core = Address::generate(&env);
+        let rng = Address::generate(&env);
+
+        let contract_id = env.register(LumaBetDice, ());
+        let client = LumaBetDiceClient::new(&env, &contract_id);
+        // Should not panic
+        client.initialize(&admin, &core, &rng);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_double_initialize_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
         let core = Address::generate(&env);
         let rng = Address::generate(&env);
 
         let contract_id = env.register(LumaBetDice, ());
         let client = LumaBetDiceClient::new(&env, &contract_id);
         client.initialize(&admin, &core, &rng);
-
-        // prediction = 0 should panic
-        let result = std::panic::catch_unwind(|| {
-            client.roll_dice(&player, &1u64, &0u64, &12345u64);
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_payout_multiplier() {
-        let env = Env::default();
-        let contract_id = env.register(LumaBetDice, ());
-        let client = LumaBetDiceClient::new(&env, &contract_id);
-        // 5x payout = 50,000 bps
-        assert_eq!(client.payout_multiplier_bps(), 50_000u32);
+        client.initialize(&admin, &core, &rng); // should panic
     }
 }

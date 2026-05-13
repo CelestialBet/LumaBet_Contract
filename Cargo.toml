@@ -6,12 +6,25 @@ members = [
 ]
 resolver = "2"
 
-# Workspace-wide package metadata
+# Workspace-wide package metadata (name belongs to each member crate, not here)
 [workspace.package]
-name = "lumabet_contract"
 version = "0.1.0"
 edition = "2021"
 authors = ["CelestialBet Team"]
 
 [workspace.dependencies]
 soroban-sdk = { version = "21.0.0" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
